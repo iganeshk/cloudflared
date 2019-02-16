@@ -1,6 +1,6 @@
 <h1 align="center">
   <a href="https://github.com/iganeshk/cloudflared/" title="Argo Tunnel client x64 precompiled binary">
-    <img alt="Argo Tunnel client x64 precompiled binary" src="https://github.com/iganeshk/cloudflared/raw/master/argo.png" width="80%" />
+    <img alt="Argo Tunnel client x64 precompiled binary" src="https://github.com/iganeshk/cloudflared/raw/master/argo.png" width="40%"/>
   </a>
   <br />
   Argo Tunnel client arm64 precompiled binary
