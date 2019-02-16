@@ -4,6 +4,7 @@
   </a>
   <br />
   Argo Tunnel client arm64 precompiled binary
+</h1>
 
 Contains the command-line client and its libraries for Argo Tunnel, a tunneling daemon that proxies any local webserver through the Cloudflare network.
 
