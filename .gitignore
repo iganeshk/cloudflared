@@ -1,9 +1,7 @@
 .GOPATH/
-bin/
 tmp/
 guide/public
 /.GOPATH
-/bin
 .idea
 .vscode
 \#*\#
