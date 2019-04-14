@@ -7,4 +7,8 @@ guide/public
 \#*\#
 cscope.*
 cloudflared
+<<<<<<< HEAD
 !cmd/cloudflared/
+=======
+bin/*.*tar.gz
+>>>>>>> 04.2019 update

@@ -15,7 +15,6 @@ wget https://dl.google.com/go/go1.11.5.linux-arm64.tar.gz
 tar -xvf go1.11.5.linux-arm64.tar.gz
 sudo mv go /usr/local
 export GOROOT=/usr/local/go
-export GOROOT=/usr/local/go
 mkdir /home/user/.gopath
 export GOPATH=/home/user/.gopath
 export PATH=$GOPATH/bin:$GOROOT/bin:$PATH
