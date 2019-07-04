@@ -1,14 +1,13 @@
 .GOPATH/
+bin/
 tmp/
 guide/public
 /.GOPATH
+/bin
 .idea
 .vscode
 \#*\#
 cscope.*
 cloudflared
-<<<<<<< HEAD
 !cmd/cloudflared/
-=======
 bin/*.*tar.gz
->>>>>>> 04.2019 update
