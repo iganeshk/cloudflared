@@ -5,7 +5,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io/ioutil"
-	"net"
 	"runtime"
 	"sync"
 
@@ -18,6 +17,8 @@ import (
 const (
 	OriginCAPoolFlag = "origin-ca-pool"
 	CaCertFlag       = "cacert"
+
+	edgeTLSServerName = "cftunnel.com"
 )
 
 // CertReloader can load and reload a TLS certificate from a particular filepath.
@@ -89,16 +90,35 @@ func LoadOriginCA(c *cli.Context, logger *logrus.Logger) (*x509.CertPool, error)
 	return originCertPool, nil
 }
 
-func LoadCustomCertPool(customCertFilename string) (*x509.CertPool, error) {
-	pool := x509.NewCertPool()
-	customCAPoolPEM, err := ioutil.ReadFile(customCertFilename)
+func LoadCustomOriginCA(originCAFilename string) (*x509.CertPool, error) {
+	// First, obtain the system certificate pool
+	certPool, err := x509.SystemCertPool()
 	if err != nil {
-		return nil, errors.Wrap(err, fmt.Sprintf("unable to read the file %s", customCertFilename))
+		certPool = x509.NewCertPool()
 	}
-	if !pool.AppendCertsFromPEM(customCAPoolPEM) {
+
+	// Next, append the Cloudflare CAs into the system pool
+	cfRootCA, err := GetCloudflareRootCA()
+	if err != nil {
+		return nil, errors.Wrap(err, "could not append Cloudflare Root CAs to cloudflared certificate pool")
+	}
+	for _, cert := range cfRootCA {
+		certPool.AddCert(cert)
+	}
+
+	if originCAFilename == "" {
+		return certPool, nil
+	}
+
+	customOriginCA, err := ioutil.ReadFile(originCAFilename)
+	if err != nil {
+		return nil, errors.Wrap(err, fmt.Sprintf("unable to read the file %s", originCAFilename))
+	}
+
+	if !certPool.AppendCertsFromPEM(customOriginCA) {
 		return nil, fmt.Errorf("error appending custom CA to cert pool")
 	}
-	return pool, nil
+	return certPool, nil
 }
 
 func CreateTunnelConfig(c *cli.Context) (*tls.Config, error) {
@@ -107,7 +127,7 @@ func CreateTunnelConfig(c *cli.Context) (*tls.Config, error) {
 		rootCAs = append(rootCAs, c.String(CaCertFlag))
 	}
 
-	userConfig := &TLSParameters{RootCAs: rootCAs}
+	userConfig := &TLSParameters{RootCAs: rootCAs, ServerName: edgeTLSServerName}
 	tlsConfig, err := GetConfig(userConfig)
 	if err != nil {
 		return nil, err
@@ -123,10 +143,6 @@ func CreateTunnelConfig(c *cli.Context) (*tls.Config, error) {
 			rootCAPool.AddCert(cert)
 		}
 		tlsConfig.RootCAs = rootCAPool
-		tlsConfig.ServerName = "cftunnel.com"
-	} else if edgeAddrs := c.StringSlice("edge"); len(edgeAddrs) > 0 {
-		// Set for development environments and for testing specific origintunneld instances
-		tlsConfig.ServerName, _, _ = net.SplitHostPort(edgeAddrs[0])
 	}
 
 	if tlsConfig.ServerName == "" && !tlsConfig.InsecureSkipVerify {

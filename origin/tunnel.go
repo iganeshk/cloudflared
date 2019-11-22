@@ -14,15 +14,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cloudflare/cloudflared/connection"
+	"github.com/cloudflare/cloudflared/cmd/cloudflared/buildinfo"
 	"github.com/cloudflare/cloudflared/h2mux"
 	"github.com/cloudflare/cloudflared/signal"
+	"github.com/cloudflare/cloudflared/streamhandler"
 	"github.com/cloudflare/cloudflared/tunnelrpc"
 	tunnelpogs "github.com/cloudflare/cloudflared/tunnelrpc/pogs"
 	"github.com/cloudflare/cloudflared/validation"
 	"github.com/cloudflare/cloudflared/websocket"
 
-	raven "github.com/getsentry/raven-go"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -41,7 +41,7 @@ const (
 )
 
 type TunnelConfig struct {
-	BuildInfo            *BuildInfo
+	BuildInfo            *buildinfo.BuildInfo
 	ClientID             string
 	ClientTlsConfig      *tls.Config
 	CloseConnOnce        *sync.Once // Used to close connectedSignal no more than once
@@ -52,6 +52,7 @@ type TunnelConfig struct {
 	HTTPTransport        http.RoundTripper
 	HeartbeatInterval    time.Duration
 	Hostname             string
+	HTTPHostHeader       string
 	IncidentLookup       IncidentLookup
 	IsAutoupdated        bool
 	IsFreeTunnel         bool
@@ -139,44 +140,8 @@ func (c *TunnelConfig) RegistrationOptions(connectionID uint8, OriginLocalIP str
 	}
 }
 
-func StartTunnelDaemon(config *TunnelConfig, shutdownC <-chan struct{}, connectedSignal *signal.Signal) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		<-shutdownC
-		cancel()
-	}()
-
-	u, err := uuid.NewRandom()
-	if err != nil {
-		return err
-	}
-
-	// If a user specified negative HAConnections, we will treat it as requesting 1 connection
-	if config.HAConnections > 1 {
-		if config.UseDeclarativeTunnel {
-			return connection.NewSupervisor(&connection.CloudflaredConfig{
-				ConnectionConfig: &connection.ConnectionConfig{
-					TLSConfig:         config.TlsConfig,
-					HeartbeatInterval: config.HeartbeatInterval,
-					MaxHeartbeats:     config.MaxHeartbeats,
-					Logger:            config.Logger.WithField("subsystem", "connection_supervisor"),
-				},
-				OriginCert:         config.OriginCert,
-				Tags:               config.Tags,
-				EdgeAddrs:          config.EdgeAddrs,
-				HAConnections:      uint(config.HAConnections),
-				Logger:             config.Logger,
-				CloudflaredVersion: config.ReportedVersion,
-			}).Run(ctx)
-		}
-		return NewSupervisor(config).Run(ctx, connectedSignal, u)
-	} else {
-		addrs, err := connection.ResolveEdgeIPs(config.Logger, config.EdgeAddrs)
-		if err != nil {
-			return err
-		}
-		return ServeTunnelLoop(ctx, config, addrs[0], 0, connectedSignal, u)
-	}
+func StartTunnelDaemon(ctx context.Context, config *TunnelConfig, connectedSignal *signal.Signal, cloudflaredID uuid.UUID) error {
+	return NewSupervisor(config).Run(ctx, connectedSignal, cloudflaredID)
 }
 
 func ServeTunnelLoop(ctx context.Context,
@@ -186,7 +151,7 @@ func ServeTunnelLoop(ctx context.Context,
 	connectedSignal *signal.Signal,
 	u uuid.UUID,
 ) error {
-	logger := config.Logger
+	connectionLogger := config.Logger.WithField("connectionID", connectionID)
 	config.Metrics.incrementHaConnections()
 	defer config.Metrics.decrementHaConnections()
 	backoff := BackoffHandler{MaxRetries: config.Retries}
@@ -199,10 +164,18 @@ func ServeTunnelLoop(ctx context.Context,
 	// Ensure the above goroutine will terminate if we return without connecting
 	defer connectedFuse.Fuse(false)
 	for {
-		err, recoverable := ServeTunnel(ctx, config, addr, connectionID, connectedFuse, &backoff, u)
+		err, recoverable := ServeTunnel(
+			ctx,
+			config,
+			connectionLogger,
+			addr, connectionID,
+			connectedFuse,
+			&backoff,
+			u,
+		)
 		if recoverable {
 			if duration, ok := backoff.GetBackoffDuration(ctx); ok {
-				logger.Infof("Retrying in %s seconds", duration)
+				connectionLogger.Infof("Retrying in %s seconds", duration)
 				backoff.Backoff(ctx)
 				continue
 			}
@@ -214,6 +187,7 @@ func ServeTunnelLoop(ctx context.Context,
 func ServeTunnel(
 	ctx context.Context,
 	config *TunnelConfig,
+	logger *log.Entry,
 	addr *net.TCPAddr,
 	connectionID uint8,
 	connectedFuse *h2mux.BooleanFuse,
@@ -233,7 +207,6 @@ func ServeTunnel(
 	}()
 
 	connectionTag := uint8ToString(connectionID)
-	logger := config.Logger.WithField("connectionID", connectionTag)
 
 	// additional tags to send other than hostname which is set in cloudflared main package
 	tags := make(map[string]string)
@@ -242,7 +215,7 @@ func ServeTunnel(
 	// Returns error from parsing the origin URL or handshake errors
 	handler, originLocalIP, err := NewTunnelHandler(ctx, config, addr.String(), connectionID)
 	if err != nil {
-		errLog := config.Logger.WithError(err)
+		errLog := logger.WithError(err)
 		switch err.(type) {
 		case dialError:
 			errLog.Error("Unable to dial edge")
@@ -258,7 +231,7 @@ func ServeTunnel(
 	errGroup, serveCtx := errgroup.WithContext(ctx)
 
 	errGroup.Go(func() error {
-		err := RegisterTunnel(serveCtx, handler.muxer, config, connectionID, originLocalIP, u)
+		err := RegisterTunnel(serveCtx, handler.muxer, config, logger, connectionID, originLocalIP, u)
 		if err == nil {
 			connectedFuse.Fuse(true)
 			backoff.SetGracePeriod()
@@ -294,6 +267,8 @@ func ServeTunnel(
 
 	err = errGroup.Wait()
 	if err != nil {
+		_ = newClientRegisterTunnelError(err, config.Metrics.regFail)
+
 		switch castedErr := err.(type) {
 		case dupConnRegisterTunnelError:
 			logger.Info("Already connected to this server, selecting a different one")
@@ -308,14 +283,12 @@ func ServeTunnel(
 			return castedErr.cause, !castedErr.permanent
 		case clientRegisterTunnelError:
 			logger.WithError(castedErr.cause).Error("Register tunnel error on client side")
-			raven.CaptureError(castedErr.cause, tags)
 			return err, true
 		case muxerShutdownError:
 			logger.Infof("Muxer shutdown")
 			return err, true
 		default:
 			logger.WithError(err).Error("Serve tunnel error")
-			raven.CaptureError(err, tags)
 			return err, true
 		}
 	}
@@ -336,6 +309,7 @@ func RegisterTunnel(
 	ctx context.Context,
 	muxer *h2mux.Muxer,
 	config *TunnelConfig,
+	logger *log.Entry,
 	connectionID uint8,
 	originLocalIP string,
 	uuid uuid.UUID,
@@ -367,13 +341,13 @@ func RegisterTunnel(
 		config.Hostname,
 		config.RegistrationOptions(connectionID, originLocalIP, uuid),
 	)
-	LogServerInfo(serverInfoPromise.Result(), connectionID, config.Metrics, config.Logger)
+	LogServerInfo(serverInfoPromise.Result(), connectionID, config.Metrics, logger)
 	if err != nil {
 		// RegisterTunnel RPC failure
 		return newClientRegisterTunnelError(err, config.Metrics.regFail)
 	}
 	for _, logLine := range registration.LogLines {
-		config.Logger.Info(logLine)
+		logger.Info(logLine)
 	}
 
 	if regErr := processRegisterTunnelError(registration.Err, registration.PermanentFailure, config.Metrics); regErr != nil {
@@ -382,24 +356,24 @@ func RegisterTunnel(
 
 	if registration.TunnelID != "" {
 		config.Metrics.tunnelsHA.AddTunnelID(connectionID, registration.TunnelID)
-		config.Logger.Infof("Each HA connection's tunnel IDs: %v", config.Metrics.tunnelsHA.String())
+		logger.Infof("Each HA connection's tunnel IDs: %v", config.Metrics.tunnelsHA.String())
 	}
 
 	// Print out the user's trial zone URL in a nice box (if they requested and got one)
 	if isTrialTunnel := config.Hostname == ""; isTrialTunnel {
 		if url, err := url.Parse(registration.Url); err == nil {
 			for _, line := range asciiBox(trialZoneMsg(url.String()), 2) {
-				config.Logger.Infoln(line)
+				logger.Infoln(line)
 			}
 		} else {
-			config.Logger.Errorln("Failed to connect tunnel, please try again.")
+			logger.Errorln("Failed to connect tunnel, please try again.")
 			return fmt.Errorf("empty URL in response from Cloudflare edge")
 		}
 	}
 
 	config.Metrics.userHostnamesCounts.WithLabelValues(registration.Url).Inc()
 
-	config.Logger.Infof("Route propagating, it may take up to 1 minute for your new route to become functional")
+	logger.Infof("Route propagating, it may take up to 1 minute for your new route to become functional")
 	return nil
 }
 
@@ -455,7 +429,7 @@ func LogServerInfo(
 	promise tunnelrpc.ServerInfo_Promise,
 	connectionID uint8,
 	metrics *TunnelMetrics,
-	logger *log.Logger,
+	logger *log.Entry,
 ) {
 	serverInfoMessage, err := promise.Struct()
 	if err != nil {
@@ -471,39 +445,6 @@ func LogServerInfo(
 	metrics.registerServerLocation(uint8ToString(connectionID), serverInfo.LocationName)
 }
 
-func H2RequestHeadersToH1Request(h2 []h2mux.Header, h1 *http.Request) error {
-	for _, header := range h2 {
-		switch header.Name {
-		case ":method":
-			h1.Method = header.Value
-		case ":scheme":
-		case ":authority":
-			// Otherwise the host header will be based on the origin URL
-			h1.Host = header.Value
-		case ":path":
-			u, err := url.Parse(header.Value)
-			if err != nil {
-				return fmt.Errorf("unparseable path")
-			}
-			resolved := h1.URL.ResolveReference(u)
-			// prevent escaping base URL
-			if !strings.HasPrefix(resolved.String(), h1.URL.String()) {
-				return fmt.Errorf("invalid path")
-			}
-			h1.URL = resolved
-		case "content-length":
-			contentLength, err := strconv.ParseInt(header.Value, 10, 64)
-			if err != nil {
-				return fmt.Errorf("unparseable content length")
-			}
-			h1.ContentLength = contentLength
-		default:
-			h1.Header.Add(http.CanonicalHeaderKey(header.Name), header.Value)
-		}
-	}
-	return nil
-}
-
 func H1ResponseToH2Response(h1 *http.Response) (h2 []h2mux.Header) {
 	h2 = []h2mux.Header{{Name: ":status", Value: fmt.Sprintf("%d", h1.StatusCode)}}
 	for headerName, headerValues := range h1.Header {
@@ -514,17 +455,14 @@ func H1ResponseToH2Response(h1 *http.Response) (h2 []h2mux.Header) {
 	return
 }
 
-func FindCfRayHeader(h1 *http.Request) string {
-	return h1.Header.Get("Cf-Ray")
-}
-
 type TunnelHandler struct {
-	originUrl  string
-	muxer      *h2mux.Muxer
-	httpClient http.RoundTripper
-	tlsConfig  *tls.Config
-	tags       []tunnelpogs.Tag
-	metrics    *TunnelMetrics
+	originUrl      string
+	httpHostHeader string
+	muxer          *h2mux.Muxer
+	httpClient     http.RoundTripper
+	tlsConfig      *tls.Config
+	tags           []tunnelpogs.Tag
+	metrics        *TunnelMetrics
 	// connectionID is only used by metrics, and prometheus requires labels to be string
 	connectionID      string
 	logger            *log.Logger
@@ -545,6 +483,7 @@ func NewTunnelHandler(ctx context.Context,
 	}
 	h := &TunnelHandler{
 		originUrl:         originURL,
+		httpHostHeader:    config.HTTPHostHeader,
 		httpClient:        config.HTTPTransport,
 		tlsConfig:         config.ClientTlsConfig,
 		tags:              config.Tags,
@@ -582,7 +521,7 @@ func NewTunnelHandler(ctx context.Context,
 		MaxHeartbeats:      config.MaxHeartbeats,
 		Logger:             config.TransportLogger.WithFields(log.Fields{}),
 		CompressionQuality: h2mux.CompressionSetting(config.CompressionQuality),
-	})
+	}, h.metrics.activeStreams)
 	if err != nil {
 		return h, "", errors.New("TLS handshake error")
 	}
@@ -605,8 +544,8 @@ func (h *TunnelHandler) ServeStream(stream *h2mux.MuxedStream) error {
 		return reqErr
 	}
 
-	cfRay := FindCfRayHeader(req)
-	lbProbe := isLBProbeRequest(req)
+	cfRay := streamhandler.FindCfRayHeader(req)
+	lbProbe := streamhandler.IsLBProbeRequest(req)
 	h.logRequest(req, cfRay, lbProbe)
 
 	var resp *http.Response
@@ -629,7 +568,7 @@ func (h *TunnelHandler) createRequest(stream *h2mux.MuxedStream) (*http.Request,
 	if err != nil {
 		return nil, errors.Wrap(err, "Unexpected error from http.NewRequest")
 	}
-	err = H2RequestHeadersToH1Request(stream.Headers, req)
+	err = streamhandler.H2RequestHeadersToH1Request(stream.Headers, req)
 	if err != nil {
 		return nil, errors.Wrap(err, "invalid request received")
 	}
@@ -638,6 +577,11 @@ func (h *TunnelHandler) createRequest(stream *h2mux.MuxedStream) (*http.Request,
 }
 
 func (h *TunnelHandler) serveWebsocket(stream *h2mux.MuxedStream, req *http.Request) (*http.Response, error) {
+	if h.httpHostHeader != "" {
+		req.Header.Set("Host", h.httpHostHeader)
+		req.Host = h.httpHostHeader
+	}
+
 	conn, response, err := websocket.ClientConnect(req, h.tlsConfig)
 	if err != nil {
 		return nil, err
@@ -665,6 +609,11 @@ func (h *TunnelHandler) serveHTTP(stream *h2mux.MuxedStream, req *http.Request) 
 
 	// Request origin to keep connection alive to improve performance
 	req.Header.Set("Connection", "keep-alive")
+
+	if h.httpHostHeader != "" {
+		req.Header.Set("Host", h.httpHostHeader)
+		req.Host = h.httpHostHeader
+	}
 
 	response, err := h.httpClient.RoundTrip(req)
 	if err != nil {
@@ -757,10 +706,6 @@ func (h *TunnelHandler) UpdateMetrics(connectionID string) {
 
 func uint8ToString(input uint8) string {
 	return strconv.FormatUint(uint64(input), 10)
-}
-
-func isLBProbeRequest(req *http.Request) bool {
-	return strings.HasPrefix(req.UserAgent(), lbProbeUserAgentPrefix)
 }
 
 // Print out the given lines in a nice ASCII box.

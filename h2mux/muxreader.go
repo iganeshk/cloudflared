@@ -11,6 +11,10 @@ import (
 	"golang.org/x/net/http2"
 )
 
+const (
+	CloudflaredProxyTunnelHostnameHeader = "cf-cloudflared-proxy-tunnel-hostname"
+)
+
 type MuxReader struct {
 	// f is used to read HTTP2 frames.
 	f *http2.Framer
@@ -83,23 +87,28 @@ func (r *MuxReader) run(parentLogger *log.Entry) error {
 	for {
 		frame, err := r.f.ReadFrame()
 		if err != nil {
+			errLogger := logger.WithError(err)
+			if errorDetail := r.f.ErrorDetail(); errorDetail != nil {
+				errLogger = errLogger.WithField("errorDetail", errorDetail)
+			}
 			switch e := err.(type) {
 			case http2.StreamError:
-				logger.WithError(err).Warn("stream error")
+				errLogger.Warn("stream error")
 				r.streamError(e.StreamID, e.Code)
 			case http2.ConnectionError:
-				logger.WithError(err).Warn("connection error")
+				errLogger.Warn("connection error")
 				return r.connectionError(err)
 			default:
 				if isConnectionClosedError(err) {
 					if r.streams.Len() == 0 {
+						// don't log the error here -- that would just be extra noise
 						logger.Debug("shutting down")
 						return nil
 					}
-					logger.Warn("connection closed unexpectedly")
+					errLogger.Warn("connection closed unexpectedly")
 					return err
 				} else {
-					logger.WithError(err).Warn("frame read error")
+					errLogger.Warn("frame read error")
 					return r.connectionError(err)
 				}
 			}
@@ -115,6 +124,9 @@ func (r *MuxReader) run(parentLogger *log.Entry) error {
 			streamID := f.Header().StreamID
 			if streamID == 0 {
 				return ErrInvalidStream
+			}
+			if stream, ok := r.streams.Get(streamID); ok {
+				stream.Close()
 			}
 			r.streams.Delete(streamID)
 		case *http2.PingFrame:
@@ -235,6 +247,8 @@ func (r *MuxReader) receiveHeaderData(frame *http2.MetaHeadersFrame) error {
 			if r.dictionaries.write != nil {
 				continue
 			}
+		case CloudflaredProxyTunnelHostnameHeader:
+			stream.tunnelHostname = TunnelHostname(header.Value)
 		}
 		headers = append(headers, Header{Name: header.Name, Value: header.Value})
 	}

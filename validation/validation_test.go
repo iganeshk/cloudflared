@@ -53,97 +53,64 @@ func TestValidateHostname(t *testing.T) {
 }
 
 func TestValidateUrl(t *testing.T) {
+	type testCase struct {
+		input          string
+		expectedOutput string
+	}
+	testCases := []testCase{
+		{"http://localhost", "http://localhost"},
+		{"http://localhost/", "http://localhost"},
+		{"http://localhost/api", "http://localhost"},
+		{"http://localhost/api/", "http://localhost"},
+		{"https://localhost", "https://localhost"},
+		{"https://localhost/", "https://localhost"},
+		{"https://localhost/api", "https://localhost"},
+		{"https://localhost/api/", "https://localhost"},
+		{"https://localhost:8080", "https://localhost:8080"},
+		{"https://localhost:8080/", "https://localhost:8080"},
+		{"https://localhost:8080/api", "https://localhost:8080"},
+		{"https://localhost:8080/api/", "https://localhost:8080"},
+		{"localhost", "http://localhost"},
+		{"localhost/", "http://localhost/"},
+		{"localhost/api", "http://localhost/api"},
+		{"localhost/api/", "http://localhost/api/"},
+		{"localhost:8080", "http://localhost:8080"},
+		{"localhost:8080/", "http://localhost:8080/"},
+		{"localhost:8080/api", "http://localhost:8080/api"},
+		{"localhost:8080/api/", "http://localhost:8080/api/"},
+		{"localhost:8080/api/?asdf", "http://localhost:8080/api/?asdf"},
+		{"http://127.0.0.1:8080", "http://127.0.0.1:8080"},
+		{"127.0.0.1:8080", "http://127.0.0.1:8080"},
+		{"127.0.0.1", "http://127.0.0.1"},
+		{"https://127.0.0.1:8080", "https://127.0.0.1:8080"},
+		{"[::1]:8080", "http://[::1]:8080"},
+		{"http://[::1]", "http://[::1]"},
+		{"http://[::1]:8080", "http://[::1]:8080"},
+		{"[::1]", "http://[::1]"},
+		{"https://example.com", "https://example.com"},
+		{"example.com", "http://example.com"},
+		{"http://hello.example.com", "http://hello.example.com"},
+		{"hello.example.com", "http://hello.example.com"},
+		{"hello.example.com:8080", "http://hello.example.com:8080"},
+		{"https://hello.example.com:8080", "https://hello.example.com:8080"},
+		{"https://bücher.example.com", "https://xn--bcher-kva.example.com"},
+		{"bücher.example.com", "http://xn--bcher-kva.example.com"},
+		{"https%3A%2F%2Fhello.example.com", "https://hello.example.com"},
+		{"https://alex:12345@hello.example.com:8080", "https://hello.example.com:8080"},
+	}
+	for i, testCase := range testCases {
+		validUrl, err := ValidateUrl(testCase.input)
+		assert.NoError(t, err, "test case %v", i)
+		assert.Equal(t, testCase.expectedOutput, validUrl, "test case %v", i)
+	}
+
 	validUrl, err := ValidateUrl("")
 	assert.Equal(t, fmt.Errorf("URL should not be empty"), err)
 	assert.Empty(t, validUrl)
 
-	validUrl, err = ValidateUrl("https://localhost:8080")
-	assert.Nil(t, err)
-	assert.Equal(t, "https://localhost:8080", validUrl)
-
-	validUrl, err = ValidateUrl("localhost:8080")
-	assert.Nil(t, err)
-	assert.Equal(t, "http://localhost:8080", validUrl)
-
-	validUrl, err = ValidateUrl("http://localhost")
-	assert.Nil(t, err)
-	assert.Equal(t, "http://localhost", validUrl)
-
-	validUrl, err = ValidateUrl("http://127.0.0.1:8080")
-	assert.Nil(t, err)
-	assert.Equal(t, "http://127.0.0.1:8080", validUrl)
-
-	validUrl, err = ValidateUrl("127.0.0.1:8080")
-	assert.Nil(t, err)
-	assert.Equal(t, "http://127.0.0.1:8080", validUrl)
-
-	validUrl, err = ValidateUrl("127.0.0.1")
-	assert.Nil(t, err)
-	assert.Equal(t, "http://127.0.0.1", validUrl)
-
-	validUrl, err = ValidateUrl("https://127.0.0.1:8080")
-	assert.Nil(t, err)
-	assert.Equal(t, "https://127.0.0.1:8080", validUrl)
-
-	validUrl, err = ValidateUrl("[::1]:8080")
-	assert.Nil(t, err)
-	assert.Equal(t, "http://[::1]:8080", validUrl)
-
-	validUrl, err = ValidateUrl("http://[::1]")
-	assert.Nil(t, err)
-	assert.Equal(t, "http://[::1]", validUrl)
-
-	validUrl, err = ValidateUrl("http://[::1]:8080")
-	assert.Nil(t, err)
-	assert.Equal(t, "http://[::1]:8080", validUrl)
-
-	validUrl, err = ValidateUrl("[::1]")
-	assert.Nil(t, err)
-	assert.Equal(t, "http://[::1]", validUrl)
-
-	validUrl, err = ValidateUrl("https://example.com")
-	assert.Nil(t, err)
-	assert.Equal(t, "https://example.com", validUrl)
-
-	validUrl, err = ValidateUrl("example.com")
-	assert.Nil(t, err)
-	assert.Equal(t, "http://example.com", validUrl)
-
-	validUrl, err = ValidateUrl("http://hello.example.com")
-	assert.Nil(t, err)
-	assert.Equal(t, "http://hello.example.com", validUrl)
-
-	validUrl, err = ValidateUrl("hello.example.com")
-	assert.Nil(t, err)
-	assert.Equal(t, "http://hello.example.com", validUrl)
-
-	validUrl, err = ValidateUrl("hello.example.com:8080")
-	assert.Nil(t, err)
-	assert.Equal(t, "http://hello.example.com:8080", validUrl)
-
-	validUrl, err = ValidateUrl("https://hello.example.com:8080")
-	assert.Nil(t, err)
-	assert.Equal(t, "https://hello.example.com:8080", validUrl)
-
-	validUrl, err = ValidateUrl("https://bücher.example.com")
-	assert.Nil(t, err)
-	assert.Equal(t, "https://xn--bcher-kva.example.com", validUrl)
-
-	validUrl, err = ValidateUrl("bücher.example.com")
-	assert.Nil(t, err)
-	assert.Equal(t, "http://xn--bcher-kva.example.com", validUrl)
-
-	validUrl, err = ValidateUrl("https%3A%2F%2Fhello.example.com")
-	assert.Nil(t, err)
-	assert.Equal(t, "https://hello.example.com", validUrl)
-
 	validUrl, err = ValidateUrl("ftp://alex:12345@hello.example.com:8080/robot.txt")
 	assert.Equal(t, "Currently Argo Tunnel does not support ftp protocol.", err.Error())
 	assert.Empty(t, validUrl)
-
-	validUrl, err = ValidateUrl("https://alex:12345@hello.example.com:8080")
-	assert.Nil(t, err)
-	assert.Equal(t, "https://hello.example.com:8080", validUrl)
 
 }
 
@@ -180,33 +147,6 @@ func TestValidateHTTPService_HTTP2HTTP(t *testing.T) {
 		}
 		panic("Shouldn't reach here")
 	})))
-
-	// Integration-style test with a mock server
-	server, client, err := createMockServerAndClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, hostname, r.Host)
-		w.WriteHeader(200)
-	}))
-	assert.NoError(t, err)
-	defer server.Close()
-	assert.Nil(t, ValidateHTTPService(originURL, hostname, client.Transport))
-
-	// this will fail if the client follows the 302
-	redirectServer, redirectClient, err := createMockServerAndClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/followedRedirect" {
-			t.Fatal("shouldn't have followed the 302")
-		}
-		if r.Method == "CONNECT" {
-			assert.Equal(t, "127.0.0.1:443", r.Host)
-		} else {
-			assert.Equal(t, hostname, r.Host)
-		}
-		w.Header().Set("Location", "/followedRedirect")
-		w.WriteHeader(302)
-	}))
-	assert.NoError(t, err)
-	defer redirectServer.Close()
-	assert.Nil(t, ValidateHTTPService(originURL, hostname, redirectClient.Transport))
-
 }
 
 // Happy path 2: originURL is HTTPS, and HTTPS connections work
@@ -235,36 +175,6 @@ func TestValidateHTTPService_HTTPS2HTTPS(t *testing.T) {
 		}
 		panic("Shouldn't reach here")
 	})))
-
-	// Integration-style test with a mock server
-	server, client, err := createSecureMockServerAndClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "CONNECT" {
-			assert.Equal(t, "127.0.0.1:443", r.Host)
-		} else {
-			assert.Equal(t, hostname, r.Host)
-		}
-		w.WriteHeader(200)
-	}))
-	assert.NoError(t, err)
-	defer server.Close()
-	assert.Nil(t, ValidateHTTPService(originURL, hostname, client.Transport))
-
-	// this will fail if the client follows the 302
-	redirectServer, redirectClient, err := createSecureMockServerAndClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/followedRedirect" {
-			t.Fatal("shouldn't have followed the 302")
-		}
-		if r.Method == "CONNECT" {
-			assert.Equal(t, "127.0.0.1:443", r.Host)
-		} else {
-			assert.Equal(t, hostname, r.Host)
-		}
-		w.Header().Set("Location", "/followedRedirect")
-		w.WriteHeader(302)
-	}))
-	assert.NoError(t, err)
-	defer redirectServer.Close()
-	assert.Nil(t, ValidateHTTPService(originURL, hostname, redirectClient.Transport))
 }
 
 // Error path 1: originURL is HTTPS, but HTTP connections work
@@ -293,37 +203,6 @@ func TestValidateHTTPService_HTTPS2HTTP(t *testing.T) {
 		}
 		panic("Shouldn't reach here")
 	})))
-
-	// Integration-style test with a mock server
-	server, client, err := createMockServerAndClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "CONNECT" {
-			assert.Equal(t, "127.0.0.1:1234", r.Host)
-		} else {
-			assert.Equal(t, hostname, r.Host)
-		}
-		w.WriteHeader(200)
-	}))
-	assert.NoError(t, err)
-	defer server.Close()
-	assert.Error(t, ValidateHTTPService(originURL, hostname, client.Transport))
-
-	// this will fail if the client follows the 302
-	redirectServer, redirectClient, err := createMockServerAndClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/followedRedirect" {
-			t.Fatal("shouldn't have followed the 302")
-		}
-		if r.Method == "CONNECT" {
-			assert.Equal(t, "127.0.0.1:1234", r.Host)
-		} else {
-			assert.Equal(t, hostname, r.Host)
-		}
-		w.Header().Set("Location", "/followedRedirect")
-		w.WriteHeader(302)
-	}))
-	assert.NoError(t, err)
-	defer redirectServer.Close()
-	assert.Error(t, ValidateHTTPService(originURL, hostname, redirectClient.Transport))
-
 }
 
 // Error path 2: originURL is HTTP, but HTTPS connections work
@@ -352,21 +231,11 @@ func TestValidateHTTPService_HTTP2HTTPS(t *testing.T) {
 		}
 		panic("Shouldn't reach here")
 	})))
+}
 
-	// Integration-style test with a mock server
-	server, client, err := createSecureMockServerAndClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "CONNECT" {
-			assert.Equal(t, "127.0.0.1:1234", r.Host)
-		} else {
-			assert.Equal(t, hostname, r.Host)
-		}
-		w.WriteHeader(200)
-	}))
-	assert.NoError(t, err)
-	defer server.Close()
-	assert.Error(t, ValidateHTTPService(originURL, hostname, client.Transport))
-
-	// this will fail if the client follows the 302
+// Ensure the client does not follow 302 responses
+func TestValidateHTTPService_NoFollowRedirects(t *testing.T) {
+	hostname := "example.com"
 	redirectServer, redirectClient, err := createSecureMockServerAndClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/followedRedirect" {
 			t.Fatal("shouldn't have followed the 302")
@@ -381,12 +250,12 @@ func TestValidateHTTPService_HTTP2HTTPS(t *testing.T) {
 	}))
 	assert.NoError(t, err)
 	defer redirectServer.Close()
-	assert.Error(t, ValidateHTTPService(originURL, hostname, redirectClient.Transport))
+	assert.NoError(t, ValidateHTTPService(redirectServer.URL, hostname, redirectClient.Transport))
 }
 
-// error path 3: origin URL is nonresponsive
+// Ensure validation times out when origin URL is nonresponsive
 func TestValidateHTTPService_NonResponsiveOrigin(t *testing.T) {
-	originURL := "https://127.0.0.1/"
+	originURL := "http://127.0.0.1/"
 	hostname := "example.com"
 	oldValidationTimeout := validationTimeout
 	defer func() {
@@ -394,7 +263,10 @@ func TestValidateHTTPService_NonResponsiveOrigin(t *testing.T) {
 	}()
 	validationTimeout = 500 * time.Millisecond
 
-	server, client, err := createSecureMockServerAndClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Use createMockServerAndClient, not createSecureMockServerAndClient.
+	// The latter will bail with HTTP 400 immediately on an http:// request,
+	// which defeats the purpose of a 'nonresponsive origin' test.
+	server, client, err := createMockServerAndClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "CONNECT" {
 			assert.Equal(t, "127.0.0.1:443", r.Host)
 		} else {
@@ -409,8 +281,42 @@ func TestValidateHTTPService_NonResponsiveOrigin(t *testing.T) {
 	defer server.Close()
 
 	err = ValidateHTTPService(originURL, hostname, client.Transport)
+	fmt.Println(err)
 	if err, ok := err.(net.Error); assert.True(t, ok) {
 		assert.True(t, err.Timeout())
+	}
+}
+
+func TestNewAccessValidatorOk(t *testing.T) {
+	ctx := context.Background()
+	url := "test.cloudflareaccess.com"
+	access, err := NewAccessValidator(ctx, url, url, "")
+
+	assert.NoError(t, err)
+	assert.NotNil(t, access)
+
+	assert.Error(t, access.Validate(ctx, ""))
+	assert.Error(t, access.Validate(ctx, "invalid"))
+
+	req := httptest.NewRequest("GET", "https://test.cloudflareaccess.com", nil)
+	req.Header.Set(accessJwtHeader, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")
+	assert.Error(t, access.ValidateRequest(ctx, req))
+}
+
+func TestNewAccessValidatorErr(t *testing.T) {
+	ctx := context.Background()
+
+	urls := []string{
+		"",
+		"tcp://test.cloudflareaccess.com",
+		"wss://cloudflarenone.com",
+	}
+
+	for _, url := range urls {
+		access, err := NewAccessValidator(ctx, url, url, "")
+
+		assert.Error(t, err, url)
+		assert.Nil(t, access)
 	}
 }
 

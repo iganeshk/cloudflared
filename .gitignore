@@ -8,7 +8,15 @@ guide/public
 cscope.*
 cloudflared
 <<<<<<< HEAD
+<<<<<<< HEAD
 !cmd/cloudflared/
 =======
 bin/*.*tar.gz
 >>>>>>> 04.2019 update
+=======
+cloudflared.exe
+!cmd/cloudflared/
+.DS_Store
+*-session.log
+ssh_server_tests/.env
+>>>>>>> upstream/master

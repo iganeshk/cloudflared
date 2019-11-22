@@ -2,10 +2,12 @@ package pogs
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/cloudflare/cloudflared/tunnelrpc"
 	"github.com/google/uuid"
+	"github.com/pkg/errors"
 
 	log "github.com/sirupsen/logrus"
 	capnp "zombiezen.com/go/capnproto2"
@@ -31,11 +33,12 @@ func UnmarshalAuthentication(s tunnelrpc.Authentication) (*Authentication, error
 }
 
 type TunnelRegistration struct {
-	Err              string
-	Url              string
-	LogLines         []string
-	PermanentFailure bool
-	TunnelID         string `capnp:"tunnelID"`
+	Err               string
+	Url               string
+	LogLines          []string
+	PermanentFailure  bool
+	TunnelID          string `capnp:"tunnelID"`
+	RetryAfterSeconds uint16
 }
 
 func MarshalTunnelRegistration(s tunnelrpc.TunnelRegistration, p *TunnelRegistration) error {
@@ -61,6 +64,7 @@ type RegistrationOptions struct {
 	RunFromTerminal      bool   `capnp:"runFromTerminal"`
 	CompressionQuality   uint64 `capnp:"compressionQuality"`
 	UUID                 string `capnp:"uuid"`
+	NumPreviousAttempts  uint8
 }
 
 func MarshalRegistrationOptions(s tunnelrpc.RegistrationOptions, p *RegistrationOptions) error {
@@ -73,25 +77,127 @@ func UnmarshalRegistrationOptions(s tunnelrpc.RegistrationOptions) (*Registratio
 	return p, err
 }
 
-type ConnectResult struct {
-	Err        *ConnectError
-	ServerInfo ServerInfo
+// ConnectResult models the result of Connect RPC, implemented by ConnectError and ConnectSuccess.
+type ConnectResult interface {
+	ConnectError() *ConnectError
+	ConnectedTo() string
+	ClientConfig() *ClientConfig
+	Marshal(s tunnelrpc.ConnectResult) error
 }
 
-func MarshalConnectResult(s tunnelrpc.ConnectResult, p *ConnectResult) error {
-	return pogs.Insert(tunnelrpc.ConnectResult_TypeID, s.Struct, p)
+func MarshalConnectResult(s tunnelrpc.ConnectResult, p ConnectResult) error {
+	return p.Marshal(s)
 }
 
-func UnmarshalConnectResult(s tunnelrpc.ConnectResult) (*ConnectResult, error) {
-	p := new(ConnectResult)
-	err := pogs.Extract(p, tunnelrpc.ConnectResult_TypeID, s.Struct)
-	return p, err
+func UnmarshalConnectResult(s tunnelrpc.ConnectResult) (ConnectResult, error) {
+	switch s.Result().Which() {
+	case tunnelrpc.ConnectResult_result_Which_err:
+		capnpConnectError, err := s.Result().Err()
+		if err != nil {
+			return nil, err
+		}
+		return UnmarshalConnectError(capnpConnectError)
+	case tunnelrpc.ConnectResult_result_Which_success:
+		capnpConnectSuccess, err := s.Result().Success()
+		if err != nil {
+			return nil, err
+		}
+		return UnmarshalConnectSuccess(capnpConnectSuccess)
+	default:
+		return nil, fmt.Errorf("Unmarshal %v not implemented yet", s.Result().Which().String())
+	}
 }
 
+// ConnectSuccess is the concrete returned type when Connect RPC succeed
+type ConnectSuccess struct {
+	ServerLocationName string
+	Config             *ClientConfig
+}
+
+func (*ConnectSuccess) ConnectError() *ConnectError {
+	return nil
+}
+
+func (cs *ConnectSuccess) ConnectedTo() string {
+	return cs.ServerLocationName
+}
+
+func (cs *ConnectSuccess) ClientConfig() *ClientConfig {
+	return cs.Config
+}
+
+func (cs *ConnectSuccess) Marshal(s tunnelrpc.ConnectResult) error {
+	capnpConnectSuccess, err := s.Result().NewSuccess()
+	if err != nil {
+		return err
+	}
+
+	err = capnpConnectSuccess.SetServerLocationName(cs.ServerLocationName)
+	if err != nil {
+		return errors.Wrap(err, "failed to set ConnectSuccess.ServerLocationName")
+	}
+
+	if cs.Config != nil {
+		capnpClientConfig, err := capnpConnectSuccess.NewClientConfig()
+		if err != nil {
+			return errors.Wrap(err, "failed to initialize ConnectSuccess.ClientConfig")
+		}
+		if err := MarshalClientConfig(capnpClientConfig, cs.Config); err != nil {
+			return errors.Wrap(err, "failed to marshal ClientConfig")
+		}
+	}
+
+	return nil
+}
+
+func UnmarshalConnectSuccess(s tunnelrpc.ConnectSuccess) (*ConnectSuccess, error) {
+	p := new(ConnectSuccess)
+
+	serverLocationName, err := s.ServerLocationName()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get tunnelrpc.ConnectSuccess.ServerLocationName")
+	}
+	p.ServerLocationName = serverLocationName
+
+	if s.HasClientConfig() {
+		capnpClientConfig, err := s.ClientConfig()
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to get tunnelrpc.ConnectSuccess.ClientConfig")
+		}
+		p.Config, err = UnmarshalClientConfig(capnpClientConfig)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to get unmarshal ClientConfig")
+		}
+	}
+
+	return p, nil
+}
+
+// ConnectError is the concrete returned type when Connect RPC encounters some error
 type ConnectError struct {
 	Cause       string
 	RetryAfter  time.Duration
 	ShouldRetry bool
+}
+
+func (ce *ConnectError) ConnectError() *ConnectError {
+	return ce
+}
+
+func (*ConnectError) ConnectedTo() string {
+	return ""
+}
+
+func (*ConnectError) ClientConfig() *ClientConfig {
+	return nil
+}
+
+func (ce *ConnectError) Marshal(s tunnelrpc.ConnectResult) error {
+	capnpConnectError, err := s.Result().NewErr()
+	if err != nil {
+		return err
+	}
+	return MarshalConnectError(capnpConnectError, ce)
 }
 
 func MarshalConnectError(s tunnelrpc.ConnectError, p *ConnectError) error {
@@ -133,46 +239,88 @@ type ConnectParameters struct {
 	NumPreviousAttempts uint8
 	Tags                []Tag
 	CloudflaredVersion  string
-}
-
-// CapnpConnectParameters is ConnectParameters represented in Cap'n Proto build-in types
-type CapnpConnectParameters struct {
-	OriginCert          []byte
-	CloudflaredID       []byte
-	NumPreviousAttempts uint8
-	Tags                []Tag
-	CloudflaredVersion  string
+	IntentLabel         string
 }
 
 func MarshalConnectParameters(s tunnelrpc.CapnpConnectParameters, p *ConnectParameters) error {
+	if err := s.SetOriginCert(p.OriginCert); err != nil {
+		return err
+	}
 	cloudflaredIDBytes, err := p.CloudflaredID.MarshalBinary()
 	if err != nil {
 		return err
 	}
-	capnpConnectParameters := &CapnpConnectParameters{
-		OriginCert:          p.OriginCert,
-		CloudflaredID:       cloudflaredIDBytes,
-		NumPreviousAttempts: p.NumPreviousAttempts,
-		CloudflaredVersion:  p.CloudflaredVersion,
+	if err := s.SetCloudflaredID(cloudflaredIDBytes); err != nil {
+		return err
 	}
-	return pogs.Insert(tunnelrpc.CapnpConnectParameters_TypeID, s.Struct, capnpConnectParameters)
+	s.SetNumPreviousAttempts(p.NumPreviousAttempts)
+	if len(p.Tags) > 0 {
+		tagsCapnpList, err := s.NewTags(int32(len(p.Tags)))
+		if err != nil {
+			return err
+		}
+		for i, tag := range p.Tags {
+			tagCapnp := tagsCapnpList.At(i)
+			if err := tagCapnp.SetName(tag.Name); err != nil {
+				return err
+			}
+			if err := tagCapnp.SetValue(tag.Value); err != nil {
+				return err
+			}
+		}
+	}
+	if err := s.SetCloudflaredVersion(p.CloudflaredVersion); err != nil {
+		return err
+	}
+	return s.SetIntentLabel(p.IntentLabel)
 }
 
 func UnmarshalConnectParameters(s tunnelrpc.CapnpConnectParameters) (*ConnectParameters, error) {
-	p := new(CapnpConnectParameters)
-	err := pogs.Extract(p, tunnelrpc.CapnpConnectParameters_TypeID, s.Struct)
+	originCert, err := s.OriginCert()
 	if err != nil {
 		return nil, err
 	}
-	cloudflaredID, err := uuid.FromBytes(p.CloudflaredID)
+
+	cloudflaredIDBytes, err := s.CloudflaredID()
 	if err != nil {
 		return nil, err
 	}
+	cloudflaredID, err := uuid.FromBytes(cloudflaredIDBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	tagsCapnpList, err := s.Tags()
+	if err != nil {
+		return nil, err
+	}
+	var tags []Tag
+	for i := 0; i < tagsCapnpList.Len(); i++ {
+		tagCapnp := tagsCapnpList.At(i)
+		name, err := tagCapnp.Name()
+		if err != nil {
+			return nil, err
+		}
+		value, err := tagCapnp.Value()
+		if err != nil {
+			return nil, err
+		}
+		tags = append(tags, Tag{Name: name, Value: value})
+	}
+
+	cloudflaredVersion, err := s.CloudflaredVersion()
+	if err != nil {
+		return nil, err
+	}
+
+	intentLabel, err := s.IntentLabel()
 	return &ConnectParameters{
-		OriginCert:          p.OriginCert,
+		OriginCert:          originCert,
 		CloudflaredID:       cloudflaredID,
-		NumPreviousAttempts: p.NumPreviousAttempts,
-		CloudflaredVersion:  p.CloudflaredVersion,
+		NumPreviousAttempts: s.NumPreviousAttempts(),
+		Tags:                tags,
+		CloudflaredVersion:  cloudflaredVersion,
+		IntentLabel:         intentLabel,
 	}, nil
 }
 
@@ -180,7 +328,9 @@ type TunnelServer interface {
 	RegisterTunnel(ctx context.Context, originCert []byte, hostname string, options *RegistrationOptions) (*TunnelRegistration, error)
 	GetServerInfo(ctx context.Context) (*ServerInfo, error)
 	UnregisterTunnel(ctx context.Context, gracePeriodNanoSec int64) error
-	Connect(ctx context.Context, paramaters *ConnectParameters) (*ConnectResult, error)
+	Connect(ctx context.Context, parameters *ConnectParameters) (ConnectResult, error)
+	Authenticate(ctx context.Context, originCert []byte, hostname string, options *RegistrationOptions) (*AuthenticateResponse, error)
+	ReconnectTunnel(ctx context.Context, jwt []byte, hostname string, options *RegistrationOptions) (*TunnelRegistration, error)
 }
 
 func TunnelServer_ServerToClient(s TunnelServer) tunnelrpc.TunnelServer {
@@ -241,11 +391,11 @@ func (i TunnelServer_PogsImpl) UnregisterTunnel(p tunnelrpc.TunnelServer_unregis
 }
 
 func (i TunnelServer_PogsImpl) Connect(p tunnelrpc.TunnelServer_connect) error {
-	paramaters, err := p.Params.Parameters()
+	parameters, err := p.Params.Parameters()
 	if err != nil {
 		return err
 	}
-	pogsParameters, err := UnmarshalConnectParameters(paramaters)
+	pogsParameters, err := UnmarshalConnectParameters(parameters)
 	if err != nil {
 		return err
 	}
@@ -258,7 +408,7 @@ func (i TunnelServer_PogsImpl) Connect(p tunnelrpc.TunnelServer_connect) error {
 	if err != nil {
 		return err
 	}
-	return MarshalConnectResult(result, connectResult)
+	return connectResult.Marshal(result)
 }
 
 type TunnelServer_PogsClient struct {
@@ -322,7 +472,7 @@ func (c TunnelServer_PogsClient) UnregisterTunnel(ctx context.Context, gracePeri
 
 func (c TunnelServer_PogsClient) Connect(ctx context.Context,
 	parameters *ConnectParameters,
-) (*ConnectResult, error) {
+) (ConnectResult, error) {
 	client := tunnelrpc.TunnelServer{Client: c.Client}
 	promise := client.Connect(ctx, func(p tunnelrpc.TunnelServer_connect_Params) error {
 		connectParameters, err := p.NewParameters()
